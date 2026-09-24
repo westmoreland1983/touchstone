@@ -113,22 +113,99 @@ def test_review_source_gets_review_done_criteria():
 
 
 def test_review_done_criteria_renders_honest_degradation():
-    """model 来源判据 question 留空 → 渲染诚实降级行（不套 direction 模板复读）。
+    """model 来源判据 question 留空 → 渲染层省略判据行（不伪造具体问题，也不复读机制模板）。
 
     设计意见 1 要求 review 类带「一句可回答的具体复核问题」（示例：回滚路径是否覆盖跨模块
-    调用失败）。normalize 层给不出 → 诚实留空。渲染层退为「下一轮复检不再命中即销项」
-    （reconcile 实际机制：sig 不再现即自动销项）。对比：确定性来源渲染「规则 X 复检不再命中」。
+    调用失败）。normalize 层给不出 → 诚实留空。渲染层对降级判据【不渲染行】——reconcile 机制
+    （sig 不再现即自动销项）已由要点速览②与条目 sig 锚点表达，逐条复读模板是纯 boilerplate。
+    对比：确定性来源渲染「规则 X 复检不再命中」；带具体问题的 review 渲染「需人工复核：…」。
     v2：达成判据行由纯函数 _render_done_criteria 产出（从 _finding_entry 抽出，合并段复用）。"""
     from touchstone.render import _render_done_criteria
-    # model 来源：question 空 → 诚实降级
+    # model 来源：question 空 → 空串 = 渲染层省略整行（调用方 `if dc_line:` 守卫）
     dc_model = {"kind": "review", "spec": {"question": ""}}
-    assert _render_done_criteria(dc_model) == "下一轮复检不再命中即销项"
+    assert _render_done_criteria(dc_model) == ""
     # 带具体复核问题的 review（如 guard_context / 未来 prompt 工程产出）→ 渲染「需人工复核」
     dc_specific = {"kind": "review", "spec": {"question": "回滚路径是否覆盖跨模块调用失败？"}}
     assert _render_done_criteria(dc_specific) == "需人工复核：回滚路径是否覆盖跨模块调用失败？"
     # 确定性来源不变：规则复检
     dc_det = {"kind": "deterministic", "spec": {"recheck": "SCOPE-001"}}
     assert _render_done_criteria(dc_det) == "规则 `SCOPE-001` 复检不再命中"
+
+
+def test_degraded_criteria_and_machine_done_note_silenced_in_checklist():
+    """渲染降噪（用户 2026-09-10：两条恒定 boilerplate 每条 finding 都复读一遍）：
+
+    1. 降级判据（PRA-* 的 question 空模板）→ 清单里不出现「达成判据」行；
+    2. 机器核销 done 的固定 note（复检未再命中/申报并经复核销项）→ 不出现「说明」行——
+       「✅ 已复核销项」标签已表达同等信息，marker 仍保留审计轨迹；
+    3. 携带真实信息的行不受影响：具体复核问题渲染「需人工复核」、author waived 反证渲染「说明」。
+    """
+    from touchstone import checklist as cl
+    from touchstone import render
+
+    def _mk(f, status, note):
+        it = cl.from_findings([f])["items"][0]           # 清单项由该 finding 生成（sig 对得上 join）
+        it.update({"status": status, "note": note})
+        return {"round": 1, "items": [it]}
+
+    f_degraded = {"rule_id": "PRA-REVIEW", "file": "a.py", "line": 1, "rationale": "问题",
+                  "fix_direction": "方向", "fix_reasoning": "依据",
+                  "done_criteria": {"kind": "review", "spec": {"question": ""}}}
+    # 1+2：降级判据 + 机器核销 note → 两行都不渲染
+    c1 = _mk(f_degraded, "done", cl.NOTE_AUTO_DONE)
+    md1 = render.render_findings_checklist([f_degraded], c1)
+    assert "达成判据" not in md1
+    assert "说明" not in md1
+    assert "✅ 已复核销项" in md1                       # 状态标签仍在（信息未丢）
+    c2 = _mk(f_degraded, "done", cl.NOTE_ACK_DONE)
+    assert "说明" not in render.render_findings_checklist([f_degraded], c2)
+    # 3a：带具体复核问题的判据照常渲染
+    md3 = render.render_findings_checklist([_rf("R-1")], _mk(_rf("R-1"), "open", ""))
+    assert "达成判据" in md3 and "需人工复核：?" in md3
+    # 3b：author waived 反证（非机制信息）照常渲染「说明」
+    f4 = _rf("R-1")
+    c4 = _mk(f4, "waived", "author 宣称可豁免（待人核准，机器未验证）：测试夹具")
+    md4 = render.render_findings_checklist([f4], c4)
+    assert "说明：" in md4 and "测试夹具" in md4
+
+
+def test_guard_fact_folds_into_reasoning_or_rationale_line():
+    """v3 瘦身（用户 2026-09-10：人不怎么看）——守卫事实不再单列「守卫事实：」行，折叠为
+    行尾 <sub> 小字：① 有依据行 → 挂依据行尾（含长依据折叠后的 </details> 同行）；② 依据被
+    去冗余省略但有「问题」行 → 挂问题行尾；③ 两皆无 → 单列小字行兜底。数据层零改动
+    （item["guard"] 照旧持久化，C 面核销注入与 waived 反证引用不受影响）。"""
+    from touchstone import checklist as cl
+    from touchstone import render
+
+    def _mk(guard, **kw):
+        f = _rf("PRA-X:a.py:1", **kw)
+        c = cl.from_findings([f])
+        c["items"][0]["guard"] = guard
+        return f, c
+
+    g = "函数 f：前置早退[if not x: return]"
+    # ① 有依据行（短依据平铺）→ 挂依据行尾
+    f, c = _mk(g, rationale="问题", reasoning="具体依据")
+    md = render.render_findings_checklist([f], c)
+    assert "守卫事实：" not in md                            # 单列行已删
+    gl = [ln for ln in md.split("\n") if "守卫" in ln][0]
+    assert gl.lstrip().startswith("- 依据：") and gl.rstrip().endswith("</sub>")
+    assert f"（守卫：{g}）</sub>" in gl
+    # ①' 长依据折叠 → 挂 </details> 同行尾
+    f, c = _mk(g, rationale="问题", reasoning="长依据" * 120)
+    md = render.render_findings_checklist([f], c)
+    gl = [ln for ln in md.split("\n") if "守卫" in ln][0]
+    assert "</details>" in gl and gl.rstrip().endswith("</sub>")
+    # ② 依据与问题同文被省（去冗余）→ 挂「问题」行尾
+    f, c = _mk(g, rationale="问题", reasoning="问题")
+    md = render.render_findings_checklist([f], c)
+    gl = [ln for ln in md.split("\n") if "守卫" in ln][0]
+    assert gl.lstrip().startswith("- 问题") and "</sub>" in gl and "依据" not in gl
+    # ③ 问题/依据皆无（rationale 空、与 direction 同文省略）→ 单列小字行兜底
+    f, c = _mk(g, rationale="", direction="方向", reasoning="")
+    md = render.render_findings_checklist([f], c)
+    gl = [ln for ln in md.split("\n") if "守卫" in ln][0]
+    assert gl.lstrip().startswith("- <sub>守卫：")
 
 
 # ---------------- 意见 3：收敛清单 ----------------
@@ -278,9 +355,9 @@ def test_ack_help_details_has_no_blank_lines_inside():
     """回归 #171：如何申报销项 <details> 内有空行（summary/body 间、body/</details> 间各一）
     → CommonMark type-6 HTML block 在首个空行处截断 → <details> 变空壳、申报指引正文渲染成
     <details> 之外的松散段落（始终可见）。去空行让整段留在同一 HTML block 内才可折叠。
-    v2：申报指引迁至 render_reference（参考信息段）。"""
+    v2：申报指引迁至 render_reference；v3：参考信息段壳移除，直接渲染 <details>。"""
     from touchstone import render
-    md = render.render_reference(verification_blocks=None, has_checklist_items=True)
+    md = render.render_reference(has_checklist_items=True)
     assert "<details>" in md and "</details>" in md
     block = md[md.index("<details>"):md.index("</details>") + len("</details>")]
     assert "\n\n" not in block, (
@@ -874,8 +951,9 @@ def test_loop_reliable_converges_normally(rule_index):
 
 # ---------------- 易读性改版：排版铁律回归（2026-07-04；v2 2026-08 六段重设计）----------------
 def test_report_layout_invariants():
-    """铁律（v2）：全文唯一 H2；③④⑤ 并列段一律 H3；状态行 blockquote（循环+风险合一）。
-    v2 版面：七段→六段——AI 评审 + 清单合为「评审发现与销项」；验证/日志 + 申报指引折进「参考信息」。"""
+    """铁律（v3）：全文唯一 H2；③④ 并列段一律 H3；状态行 blockquote（循环+风险合一）。
+    v3 版面：⑤「参考信息」段壳与「验证与日志」折叠块移除——申报指引 <details> 直接渲染、
+    无段标题；运行日志不进评论（check-run 页可达）。"""
     import re as _re
     from touchstone import render, checklist as cl
     risk = {"risk_band": "mid", "human_action": "a", "verification_decision": "v",
@@ -887,7 +965,6 @@ def test_report_layout_invariants():
     body = render.render_report(
         risk, [f], scope_facts=sf, checklist=cl.from_findings([f]),
         loop_info=("continue", "待 author 逐项申报", ""),
-        verification_blocks=["📄 完整 LLM 交互日志：http://x"],
         markers="<!-- m -->", gate_line="1/1")
     # <pre> 内的 skill 正文按字面渲染（## 不会成标题）——版面不变量只看会被渲染的行
     visible = _re.sub(r"<pre>.*?</pre>", "", body, flags=_re.DOTALL)
@@ -895,12 +972,12 @@ def test_report_layout_invariants():
     h2 = [l for l in lines if l.startswith("## ")]
     h3 = [l for l in lines if l.startswith("### ") and not l.startswith("#### ")]
     assert len(h2) == 1 and "Touchstone · AI Committer 代码检视" in h2[0]  # 唯一 H2 承载品牌与定位
-    # v2 六段：静态检查（③）+ 评审发现与销项（④）+ 参考信息（⑤）三段 H3 并列
-    assert {l.split("（")[0] for l in h3} == {"### 静态检查", "### 评审发现与销项",
-                                              "### 参考信息"}  # 并列段同级
+    # v3：静态检查（③）+ 评审发现与销项（④）两段 H3 并列；⑤ 无段标题壳
+    assert {l.split("（")[0] for l in h3} == {"### 静态检查", "### 评审发现与销项"}
+    assert "### 参考信息" not in body                            # v3：参考信息段壳已移除
+    assert "验证与日志" not in body                              # v3：验证/日志折叠块已移除
     assert any(l.startswith("> ") for l in lines)                   # 状态行 blockquote
-    assert "完整 LLM 交互日志：" in body
-    assert "<details><summary>如何申报销项</summary>" in body        # 申报指引折叠（参考信息段）
+    assert "<details><summary>如何申报销项</summary>" in body        # 申报指引折叠（直接渲染）
     assert "风险等级：" in body and "触发因子" in body               # 状态行含风险+触发因子
     assert "| 风险等级 | 建议动作 | 验证建议 | 影响面 |" not in body    # 旧四列枚举表已移除
 
@@ -1255,11 +1332,12 @@ def test_ack_section_readable_layout():
     from touchstone import render
     md = render.render_reference(has_checklist_items=True)
     frag = md.split("<details><summary>如何申报销项</summary>")[1].split("</details>")[0]
-    assert frag.count("<br>") == 7                              # 8 行（指引/链接/速览①-⑤）= 7 个行间分隔
+    assert frag.count("<br>") == 8                              # 9 行（指引/链接/速览①-⑥）= 8 个行间分隔
     assert frag.rstrip("\n").count("\n") >= 2                  # 源码层仍逐行（可 diff）
     assert "<pre>" not in frag and "skill 正本全文" not in frag  # 无正文源码/无二级折叠
-    assert len(frag) < 600                                      # 打开一级 = 短指引，非糊文
-    assert "每 2 分钟检查一次" in frag and "直到 ✅ 收敛" in frag  # ⑤ 多轮轮询提醒在速览里
+    assert len(frag) < 700                                      # 打开一级 = 短指引，非糊文（5 行时 600；6 行按比例 700）
+    assert "每 1 分钟检查一次" in frag and "直到 ✅ 收敛" in frag  # ⑤ 多轮轮询提醒在速览里
+    assert "本地全量测试不必每轮跑" in frag and "findings 清零后" in frag  # ⑥ 全量测试降频在速览里
     assert "可安装为 skill" in frag                             # 链接指针仍在（参考入口不丢）
     assert "\n\n" not in frag                                 # 无空行（#168）
 

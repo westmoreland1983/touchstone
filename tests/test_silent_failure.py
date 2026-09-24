@@ -133,13 +133,13 @@ def test_e2e_degraded_field_self_report_degrades(monkeypatch):
 
 
 def test_unreliable_callout_concise_names_stage():
-    """CAUTION 精简（两行）：点明失败环节 + 指向验证与日志；原始 dump 不进本框。"""
+    """CAUTION 精简（两行）：点明失败环节 + 指向原始错误折叠块（v3：并入告警区，不再是「验证与日志」段）。"""
     from touchstone import render
     detail = "improve 工具 LLM 调用失败：litellm.Timeout——stderr 失败相关行：\nError during LLM inference: ..."
     box = render.render_unreliable_callout("llm_failed", ai_raw_count=0, added_lines=50,
                                            engine_detail=detail)
     assert "本轮 AI 评审不可信" in box and "LLM 调用失败" in box   # 点明环节
-    assert "验证与日志" in box                                    # 指向详列原始错误处
+    assert "下方折叠块" in box and "验证与日志" not in box         # 指向 v3 告警区折叠块
     assert "litellm.Timeout" not in box and "Error during LLM inference" not in box  # 原始 dump 不塞进精简框
     assert box.count("\n") <= 3                                   # 两行正文（含 [!CAUTION] 头）
 
@@ -157,20 +157,29 @@ def test_redact_secrets_strips_credentials_unit():
 
 
 def test_render_engine_detail_redacts_fences_truncates():
-    """engine_detail 渲染进公开 PR 评论前三连：脱敏 + 四反引号围栏 + 超长截断标记（PR #74）。"""
-    secret = "Bearer sk-" + "a" * 30
-    # raw error 自身含三反引号（旧三反引号围栏会被它提前闭合）+ 超长
-    blob = secret + "\n```python\nTraceback (most recent call last):\n```\n" + "x" * 2000
-    block = orc._render_engine_detail("llm_failed", blob)
-    assert block                                                  # 降级 + 有 detail → 出块
-    assert "sk-" + "a" * 30 not in block and "***REDACTED***" in block   # #3 脱敏
-    assert "````\n" in block                                      # #1 四反引号围栏
-    assert "已截断" in block                                       # #2 截断标记
+    """降级原始错误折叠块（v3：原「验证与日志」段并入②告警区，orchestrator._render_engine_detail
+    退役）：脱敏仍在 orchestrator 呈现边界（post_results 先 _redact_secrets，本测直接喂脱敏后串）；
+    本层负责 HTML 转义 + <pre> 包裹（<details> 内 markdown 围栏不解析）+ 超长截断标记 +
+    空行折叠（空行会终止 type-6 HTML block，#168 同源）。"""
+    from touchstone import render
+    # 已脱敏的 raw error：含三反引号（旧 markdown 围栏会被提前闭合）+ HTML 敏感字符 + 超长
+    blob = ("Bearer ***REDACTED***\n```python\n<b>Traceback</b> (most recent call last):\n```\n\n\n"
+            + "x" * 2000)
+    block = render._engine_detail_fold("llm_failed", blob)
+    assert block.startswith("<details><summary>评审引擎降级（llm_failed）")   # 降级 + 有 detail → 出折叠块
+    assert "<pre>" in block and "</pre>" in block                # <pre> 包裹（非 markdown 围栏）
+    assert "&lt;b&gt;Traceback&lt;/b&gt;" in block               # HTML 转义（防注入/防吞段）
+    assert "已截断" in block                                     # 截断标记
+    assert "pr-agent-interaction.log" in block                   # llm_failed：子进程真跑过，指向交互日志
+    # PRA-REVIEW round-3：no_engine/provider_failed 下 PR-Agent 没起、该 artifact 不存在——
+    # 指过去是死链。截断指针按状态切换到 job 运行日志，不再误导。
+    block_ne = render._engine_detail_fold("no_engine", blob)
+    assert "pr-agent-interaction.log" not in block_ne and "本 job 运行日志" in block_ne
     # engine 正常 / 无 detail → 不出块
-    assert orc._render_engine_detail("ok", blob) == ""
-    assert orc._render_engine_detail("llm_failed", "") == ""
+    assert render._engine_detail_fold("ok", blob) == ""
+    assert render._engine_detail_fold("llm_failed", "") == ""
     # 短 detail 不加截断标记、内容保留
-    short = orc._render_engine_detail("provider_failed", "短错误：连接超时")
+    short = render._engine_detail_fold("provider_failed", "短错误：连接超时")
     assert "已截断" not in short and "短错误" in short
 
 

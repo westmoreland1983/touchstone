@@ -1050,8 +1050,8 @@ def normalize(items, nmap=None):
             # （=direction），不足以生成设计文档所要求的「一句可回答的具体复核问题」（示例：
             # 「新增的回滚路径是否覆盖了跨模块调用失败的分支？」）。此前用固定模板
             # 「{direction}」是否已按方向解决？套 direction 当占位 → 退化为止复读修复方向，
-            # 零新信息。诚实降级：question 留空，渲染层退为「下一轮复检不再命中即销项」
-            # （reconcile 实际机制：sig 不再现即自动销项，本就不靠判据文本）。确定性来源
+            # 零新信息。诚实降级：question 留空，渲染层省略判据行（reconcile 实际机制——sig
+            # 不再现即自动销项——已由要点速览②与 sig 锚点表达，本就不靠判据文本）。确定性来源
             # （contract/probe）仍给真实机器可验判据（recheck rule_id / replay mutant）。
             "done_criteria": {"kind": "review", "spec": {"question": ""}},
             "suggested_fix": direction,   # 已废弃字段的过渡别名（=方向，不含补丁），供旧消费方

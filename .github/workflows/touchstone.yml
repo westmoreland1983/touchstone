@@ -235,7 +235,7 @@ jobs:
           LLM_API_KEY:  ${{ secrets.LLM_API_KEY }}
           LLM_MODEL:    ${{ secrets.LLM_MODEL }}      # pr_agent_runner 映射成 LiteLLM 的 openai/<model> + OPENAI_API_KEY/BASE
           # SIZE-001 体量门禁阈值经 repo variable 可调（orchestrator._max_diff_lines 读 env；空串=未设
-          # 回落默认 1000、"0"=关闭）。接线修复：此前从未透传，vars.TOUCHSTONE_MAX_DIFF_LINES 是死配置。
+          # 回落默认 3000、"0"=关闭）。接线修复：此前从未透传，vars.TOUCHSTONE_MAX_DIFF_LINES 是死配置。
           TOUCHSTONE_MAX_DIFF_LINES: ${{ vars.TOUCHSTONE_MAX_DIFF_LINES }}
           # LLM 上下文/输出 token 预算（部署方按模型卡填【repo variable】，非敏感值不占 secret——
           # 同 TOUCHSTONE_MAX_ROUNDS 教义。迁移期双读：variable 优先、旧 secret 兜底，部署方把值
@@ -247,13 +247,13 @@ jobs:
           TOUCHSTONE_LLM_OUTPUT_TOKENS:  ${{ vars.TOUCHSTONE_LLM_OUTPUT_TOKENS || secrets.TOUCHSTONE_LLM_OUTPUT_TOKENS }}
           TOUCHSTONE_PRAGENT_CMD: ".pragent-venv/bin/python -m touchstone.pr_agent_runner"
           TOUCHSTONE_INTERACTION_LOG: "pr-agent-interaction.log"   # 完整 LLM 交互日志（artifact，评审评论里贴链接）
-          TOUCHSTONE_PRAGENT_TIMEOUT: "3600"            # pr-agent 子进程超时（秒）。glm-5.2 慢（单次 360s+），
-                                                          # improve+review 各含重试，需足够余量；可调
+          TOUCHSTONE_PRAGENT_TIMEOUT: "3600"            # pr-agent 子进程超时（秒）。按慢模型实测余量定
+                                                          # （glm-5.2 实测单次 360s+），improve+review 各含重试，需足够余量；可调
           TOUCHSTONE_LLM_CALL_TIMEOUT: "600"            # 单次 LLM 调用超时（秒，pr-agent ai_timeout）。【语义勘误】
                                                           # 这是 httpx per-read 超时、不是墙钟：端点持续出字节则不触发
                                                           # （生产单调用实测 1515s；滴流实验可无限续命）。流式化后该语义
                                                           # 恰好变正确：真死等 600s 必杀、持续出字不误杀。
-          TOUCHSTONE_LLM_REFLECT_MODEL: "glm-4.5-air"   # improve 自评（第二次 LLM 调用，pr-agent 0.39 mandatory 的
+          TOUCHSTONE_LLM_REFLECT_MODEL: "glm-4.7"       # improve 自评（第二次 LLM 调用，pr-agent 0.39 mandatory 的
                                                           # self-reflection 打分）专用模型 = config.model_reasoning，
                                                           # 【不是】fallback_models（后者是主调用失败换模清单，已清空）。
                                                           # 自评是浅任务，小模型即可，improve 健康路径耗时近乎减半。

@@ -458,7 +458,7 @@ def run(pr_url, mode, extra_instructions=None):
         # improve 自评换模。注意概念区分：这是 config.model_reasoning（improve 生成建议后那次
         # mandatory self-reflection 打分调用【专用】的模型，pr_code_suggestions.py:409），
         # 【不是】fallback_models（那是主调用失败后 retry_with_fallback_models 的换模清单，
-        # 上面已清空）。自评是浅任务无需大模型；指到 glm-4.5-air 可把 improve 健康路径
+        # 上面已清空）。自评是浅任务无需大模型；指到 glm-4.7 可把 improve 健康路径
         # 耗时近乎减半。不设 = 沿用主模型（pr-agent 默认）。
         _reflect = os.environ.get("TOUCHSTONE_LLM_REFLECT_MODEL", "").strip()
         if _reflect:

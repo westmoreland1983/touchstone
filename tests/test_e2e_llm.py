@@ -9,7 +9,7 @@
 LLM 配置（皆可 env 覆盖；key 默认复用 Claude Code 的 ANTHROPIC_AUTH_TOKEN，绝不写入仓库/记忆）：
     LLM_API_KEY   默认 $ANTHROPIC_AUTH_TOKEN（Claude Code 当前用的 key）
     LLM_BASE_URL  默认 https://open.bigmodel.cn/api/coding/paas/v4（coding 端点，key 可用）
-    LLM_MODEL     默认 glm-5.2（与 Claude Code 同款）；设 glm-4.5-air = 快稳基线（迭代时省时）
+    LLM_MODEL     默认 glm-5.3（与 Claude Code 同款）；设 glm-4.5-air = 快稳基线（迭代时省时）
 
 实现说明（两种模式）：
   • 【真子进程模式】（`test_llm_e2e_subproc_*`）：本地装 pr-agent（`python -m venv .pragent-venv &&
@@ -51,7 +51,7 @@ def _llm_conf():
     if not key:
         pytest.skip("未提供 LLM_API_KEY / ANTHROPIC_AUTH_TOKEN——真 LLM 端到端需 key")
     base = os.environ.get("LLM_BASE_URL", "https://open.bigmodel.cn/api/coding/paas/v4")
-    model = os.environ.get("LLM_MODEL", "glm-5.2")
+    model = os.environ.get("LLM_MODEL", "glm-5.3")
     return key, base, model
 
 

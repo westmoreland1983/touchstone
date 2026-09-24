@@ -35,6 +35,12 @@ import re
 
 from touchstone.atomicio import atomic_write_json
 
+# 机器核销 done 的两类固定 note（数据层/marker 保留作审计轨迹；渲染层对这两条不显示——
+# 「✅ 已复核销项」标签已表达同等信息，逐条复读是 boilerplate。见 render.render_findings_checklist）。
+NOTE_ACK_DONE = "申报并经复核销项"      # author 申报 done 且复检不再命中（ack 命中路径）
+NOTE_AUTO_DONE = "复检未再命中，销项"    # 未申报但复检不再命中（自动销项路径）
+MACHINE_DONE_NOTES = frozenset({NOTE_ACK_DONE, NOTE_AUTO_DONE})
+
 _OPEN = "<!-- touchstone-checklist: "
 _CLOSE = "-->"
 
@@ -183,7 +189,7 @@ def reconcile(prev, acks, current_findings, round_no=None, review_reliable=True)
                 elif not review_reliable:
                     it["note"] = "done 申报待可靠轮复核：本轮 LLM 评审不可信（引擎降级/可疑空收敛），暂不销项"
                 else:
-                    it["status"], it["note"] = "done", "申报并经复核销项"
+                    it["status"], it["note"] = "done", NOTE_ACK_DONE
             elif verb == "waived":
                 if note:
                     # author 自证：受理为 waived（计入展示销项率），但标记待人核准——
@@ -199,7 +205,7 @@ def reconcile(prev, acks, current_findings, round_no=None, review_reliable=True)
                 else:
                     it["note"] = "split 申报未带链接/编号，不受理"
         elif not still_firing and review_reliable:
-            it["status"], it["note"] = "done", "复检未再命中，销项"
+            it["status"], it["note"] = "done", NOTE_AUTO_DONE
         elif not still_firing and not review_reliable:
             it["note"] = "本轮 LLM 评审不可信（引擎降级/可疑空收敛），不予自动销项，待可靠轮复核"
 

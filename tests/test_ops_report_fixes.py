@@ -24,18 +24,18 @@ def test_empty_env_falls_back_to_default(monkeypatch):
 
 
 def test_max_diff_lines_empty_keeps_gate(monkeypatch):
-    """上游报告问题三：空串此前经 `or 0` 静默关闭 SIZE-001 体量门禁。现空串→默认 1000，仅显式 0 关闭。"""
+    """上游报告问题三：空串此前经 `or 0` 静默关闭 SIZE-001 体量门禁。现空串→默认 3000，仅显式 0 关闭。"""
     from touchstone import orchestrator as O
     monkeypatch.setenv("TOUCHSTONE_MAX_DIFF_LINES", "")
-    assert O._max_diff_lines() == 1000
+    assert O._max_diff_lines() == 3000
     monkeypatch.setenv("TOUCHSTONE_MAX_DIFF_LINES", "0")
     assert O._max_diff_lines() == 0
     monkeypatch.setenv("TOUCHSTONE_MAX_DIFF_LINES", "250")
     assert O._max_diff_lines() == 250
     monkeypatch.setenv("TOUCHSTONE_MAX_DIFF_LINES", "1k")   # 评审意见：非数字（typo）→ 告警回落默认，门禁不失效、评审不崩
-    assert O._max_diff_lines() == 1000
+    assert O._max_diff_lines() == 3000
     monkeypatch.delenv("TOUCHSTONE_MAX_DIFF_LINES", raising=False)
-    assert O._max_diff_lines() == 1000
+    assert O._max_diff_lines() == 3000
 
 
 def test_ping_switch(monkeypatch):

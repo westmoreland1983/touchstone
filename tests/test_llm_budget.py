@@ -124,8 +124,8 @@ def test_size_gate_allows_within_limit(monkeypatch):
     assert not any(f.get("rule_id") == "SIZE-001" for f in out["findings"])
 
 
-def test_size_gate_default_1000_under_limit(monkeypatch):
-    """未设 TOUCHSTONE_MAX_DIFF_LINES → 默认上限 1000 行。200 行 < 1000 → 放行：正常调 LLM、不产 SIZE-001。"""
+def test_size_gate_default_3000_under_limit(monkeypatch):
+    """未设 TOUCHSTONE_MAX_DIFF_LINES → 默认上限 3000 行。200 行 < 3000 → 放行：正常调 LLM、不产 SIZE-001。"""
     from touchstone import orchestrator as orc
     monkeypatch.delenv("TOUCHSTONE_MAX_DIFF_LINES", raising=False)
     diff = "".join(f"diff --git a/f{i}.py b/f{i}.py\n+++ b/f{i}.py\n@@ -0,0 +1 @@\n+x\n" for i in range(200))
@@ -135,11 +135,11 @@ def test_size_gate_default_1000_under_limit(monkeypatch):
     assert not any(f.get("rule_id") == "SIZE-001" for f in out["findings"])
 
 
-def test_size_gate_default_1000_over_limit_blocks(monkeypatch):
-    """未设 TOUCHSTONE_MAX_DIFF_LINES → 默认 1000 行。1200 行 > 1000 → SIZE-001 block + 跳过 LLM。"""
+def test_size_gate_default_3000_over_limit_blocks(monkeypatch):
+    """未设 TOUCHSTONE_MAX_DIFF_LINES → 默认 3000 行。3200 行 > 3000 → SIZE-001 block + 跳过 LLM。"""
     from touchstone import orchestrator as orc
     monkeypatch.delenv("TOUCHSTONE_MAX_DIFF_LINES", raising=False)
-    diff = "".join(f"diff --git a/f{i}.py b/f{i}.py\n+++ b/f{i}.py\n@@ -0,0 +1 @@\n+x\n" for i in range(1200))
+    diff = "".join(f"diff --git a/f{i}.py b/f{i}.py\n+++ b/f{i}.py\n@@ -0,0 +1 @@\n+x\n" for i in range(3200))
     pr = {"diff": diff, "pr_agent_output": {"SHOULD_NOT_BE_USED": True}}
     out = orc.review_pr(pr, {}, {})
     size = [f for f in out["findings"] if f.get("rule_id") == "SIZE-001"]

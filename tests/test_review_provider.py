@@ -898,20 +898,20 @@ def test_fetch_sets_raw_review_excerpt_meta_on_injection():
 
 
 def test_clean_review_trace_appends_llm_excerpt_when_zero_raw():
+    """v3 瘦身（用户 2026-09-10：三行横幅 + LLM 原始 review 段快照太罗嗦）——excerpt 不再贴进
+    横幅（快照仍落 touchstone-findings.json 供排查）；防静默信号由一行文案承载（🟢 已端到端
+    运行 + 0 条原始建议 + 规模判断），可疑空收敛另有 review_reliable→CAUTION 兜底。"""
     from touchstone import orchestrator as orc
     excerpt = {"estimated_effort_to_review": "3", "relevant_tests": "Yes", "security_concerns": "No"}
-    # 0 原始建议（无实质意见）→ 贴 LLM 原始 review 段，打消"是否真审过"疑虑
+    # 0 原始建议 + 改动不小 → 可疑一行（不再贴 excerpt 全段）
     t = orc._clean_review_trace("ok", ai_raw_count=0, added_lines=120, n_changed=8,
                                 raw_excerpt=excerpt)
-    assert "LLM 原始评审" in t
-    assert "`estimated_effort_to_review`: 3" in t
-    assert "key_issues / code_suggestions 均空" in t
-    # 有原始建议（ai_raw_count>0）→ 不贴 excerpt（"返回 N 条原始建议"已足）
-    assert "LLM 原始评审" not in orc._clean_review_trace(
-        "ok", ai_raw_count=5, added_lines=120, n_changed=8, raw_excerpt=excerpt)
-    # excerpt 空 → 无内容可贴，不输出该块
-    assert "LLM 原始评审" not in orc._clean_review_trace(
-        "ok", ai_raw_count=0, added_lines=3, n_changed=1, raw_excerpt={})
+    assert "LLM 原始评审" not in t and "estimated_effort_to_review" not in t   # v3：excerpt 不进横幅
+    assert "已端到端运行" in t and "人工扫一眼" in t and t.count("\n") == 0    # 一行化
+    # 有原始建议（ai_raw_count>0）→ 归一后 0 条，一行说明
+    t3 = orc._clean_review_trace("ok", ai_raw_count=5, added_lines=120, n_changed=8,
+                                 raw_excerpt=excerpt)
+    assert "5 条原始建议" in t3 and "LLM 原始评审" not in t3 and t3.count("\n") == 0
     # 降级 → 溯源整体不输出（由 _engine_banner 负责）
     assert orc._clean_review_trace("llm_failed", 0, 0, 0, raw_excerpt=excerpt) == ""
 
