@@ -4,7 +4,7 @@
 # 生成命令：pip freeze | grep -iE '<直接依赖及其传递依赖>' | sort
 # CI 持续 pip-audit 本文件（阻断）：升级 pin 时须保持零已知漏洞（2026-07-17 起）。
 PyYAML==6.0.1
-anyio==4.14.1
+anyio==4.14.2
 certifi==2026.2.25
 distro==1.9.0
 httpx==0.28.1
