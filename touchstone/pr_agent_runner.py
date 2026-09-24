@@ -80,6 +80,40 @@ def _ix(msg):
     _IX.append(msg)
 
 
+# GitCode /pulls/{n}/files 的 file.status 实测词汇（2026-09-24 探针 PR，add/modify/delete）：
+#   新增 = 'added'；删除 = 'deleted'（GitLab 系词汇）；修改 = 【键缺失】→ PyGithub 返回 None。
+# pr-agent 的 github_provider 只认 added/removed/renamed/modified，其余一律
+# "Unknown edit type: ..." → EDIT_TYPE.UNKNOWN（删除文件被误分类、原/新内容加载策略全错）。
+# 故透传前先归一；Gitee 系 'updated'/'update' 未实测到，纯防御性映射（未见即零影响）。
+_GITCODE_STATUS_NORMALIZE = {
+    "deleted": "removed",
+    "update": "modified",
+    "updated": "modified",
+}
+
+
+def _gitcode_infer_status(status_value, raw_data):
+    """GitCode 场景的 PyGithub File.status 归一/推断（纯函数，测试直测，无需 pr-agent）。
+
+    优先级：真 status 值（归一成 pr-agent 认的词汇）> patch dict 内的
+    new_file/deleted_file/renamed_file 布尔（实测这些字段在 patch 【内】，不在文件级）
+    > 兜底 'modified'（status 与布尔全缺时的最常见形态）。"""
+    if isinstance(status_value, str):
+        v = status_value.strip().lower()
+        if v:
+            return _GITCODE_STATUS_NORMALIZE.get(v, v)
+    raw = raw_data if isinstance(raw_data, dict) else {}
+    p = raw.get("patch")
+    p = p if isinstance(p, dict) else {}
+    if p.get("new_file"):
+        return "added"
+    if p.get("deleted_file"):
+        return "removed"
+    if p.get("renamed_file"):
+        return "renamed"
+    return "modified"
+
+
 def _write_interaction_log(out):
     """把本次 LLM 交互的完整轨迹 + pr-agent 原始输出写到 TOUCHSTONE_INTERACTION_LOG（供 workflow
     上传为 artifact、评审评论里贴链接）。失败不影响主流程。"""
@@ -350,10 +384,14 @@ def run(pr_url, mode, extra_instructions=None):
             _ix("PyGithub Auth.Token.token_type → Bearer（GitCode v5 鉴权适配）")
         except Exception as e:
             _ix(f"Auth.Token Bearer monkeypatch 失败: {type(e).__name__}: {e}")
-        # GitCode 的 /pulls/{n}/files 的 patch 字段是 {"diff":"...","old_path":...,"new_path":...}
-        # dict，而 PyGithub 的 File.patch 期望 str → 访问报 BadAttributeException。
+        # GitCode 的 /pulls/{n}/files 的 patch 字段是 {"diff":"...","old_path":...,"new_path":...,
+        # "new_file":...,"deleted_file":...,"renamed_file":...}（GitLab 系 diff 结构，布尔/路径
+        # 字段全在 patch dict 【内】，文件级只有 filename/status/additions/deletions 等），
+        # 而 PyGithub 的 File.patch 期望 str → 访问报 BadAttributeException。
         # monkeypatch File.patch property 从 dict 提取 diff 字符串；GitHub 的 str 路径
         # 原样返回（rawData.patch 非 dict 时透传），不影响 GitHub 场景。
+        # File.status 同源坑：GitCode 删除文件返回 'deleted'、修改文件【缺键】（None），
+        # pr-agent 只认 added/removed/renamed/modified → 见 _gitcode_infer_status 归一。
         try:
             from github.File import File as _gh_file
 
@@ -375,20 +413,9 @@ def run(pr_url, mode, extra_instructions=None):
                     v = self._status.value
                 except Exception:
                     v = None
-                if v:
-                    return v
-                raw = getattr(self, "_rawData", None) or {}
-                p = raw.get("patch")
-                if isinstance(p, dict):
-                    if p.get("new_file"):
-                        return "added"
-                    if p.get("deleted_file"):
-                        return "removed"
-                    if p.get("renamed_file"):
-                        return "renamed"
-                return "modified"
+                return _gitcode_infer_status(v, getattr(self, "_rawData", None))
             _gh_file.status = property(_status_prop)
-            _ix("PyGithub File.status → GitCode patch dict booleans 推断（适配）")
+            _ix("PyGithub File.status → GitCode 状态归一/推断（适配）")
         except Exception as e:
             _ix(f"File.patch/status monkeypatch 失败: {type(e).__name__}: {e}")
     if model_override:

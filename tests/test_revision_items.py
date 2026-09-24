@@ -1264,10 +1264,12 @@ def test_ack_section_readable_layout():
     assert "\n\n" not in frag                                 # 无空行（#168）
 
 
-def test_collapse_skipped_on_gitcode(monkeypatch, capsys):
-    """合并 #186 后守卫：GitCode 的 PR 评论 id 与 GitHub /issues/comments 命名空间
-    未必一致——拿 pulls 侧 id PATCH issues/comments/{id} 可能改错评论；编辑端点
-    无法离线核实，故 GitCode 整体跳过折叠（纯视觉功能，降级无状态损失）。"""
+def test_collapse_active_on_gitcode(monkeypatch):
+    """PR#221 行为变更：GitCode 折叠从"整体跳过"（#186 守卫）改为实编。
+    2026-09-24 探针实测销项 #186 的担忧：评论取自 /pulls/{n}/comments，其 id 与
+    PATCH /pulls/comments/{id} 同一命名空间（不存在跨命名空间改错评论）；
+    JSON 体 200 且落库（官方文档亦声明 application/json）。
+    GitCode 分支直连 requests（gh() 的 base 只认 GITHUB_API_URL，见实现注释）。"""
     from touchstone import orchestrator as orc
     monkeypatch.setattr(orc, "_is_gitcode", lambda: True)
     calls = []
@@ -1276,10 +1278,25 @@ def test_collapse_skipped_on_gitcode(monkeypatch, capsys):
         calls.append(method)
 
     monkeypatch.setattr(orc, "gh", fake_gh)
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+    def fake_patch(url, headers=None, **kw):
+        seen.update(url=url, kw=kw)
+        return _Resp()
+
+    monkeypatch.setattr(orc.requests, "patch", fake_patch)
     review = "## Touchstone · AI Committer 代码检视\n\n> 第 1 轮\n<!-- touchstone-loop: {} -->"
     orc._collapse_stale_reviews("o", "r", "t", [{"id": 21, "body": review}])
-    assert calls == []                                   # 绝不 PATCH（防改错评论）
-    assert "GitCode" in capsys.readouterr().err          # 有告警可观测
+    assert calls == []                                   # GitCode 不走 gh()（issues 端点对 PR 是 404）
+    assert seen["url"].endswith("/repos/o/r/pulls/comments/21")
+    assert seen["kw"].get("json") == {"body": orc._collapse_review_body(review)}
+    assert "data" not in seen["kw"]                      # JSON 体，非 form-data
     monkeypatch.setattr(orc, "_is_gitcode", lambda: False)
     orc._collapse_stale_reviews("o", "r", "t", [{"id": 22, "body": review}])
     assert calls == ["PATCH"]                            # GitHub 侧行为不变

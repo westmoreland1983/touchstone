@@ -82,18 +82,32 @@ def _is_gitcode():
 
 def _gitcode_files_to_diff(files):
     """GitCode /pulls/{n}/files 的 JSON 数组 → unified diff 文本（供 unidiff PatchSet 解析）。
-    GitCode 的 patch 字段是 {"diff": "<hunks>"}（嵌套 dict），与 GitHub 的 patch（纯字符串）
-    不同，故专门适配。每文件拼 diff --git / --- a/ / +++ b/ 头 + hunks。
+    字段层级以 2026-09-24 探针 PR 实测为准（westmoreland/touchstone，add/modify/delete 全覆盖）：
+    - 文件级仅 filename/status/additions/deletions/sha/blob_url/raw_url；
+    - patch 是嵌套 dict：diff/old_path/new_path/a_mode/b_mode/new_file/deleted_file/
+      renamed_file 全在 patch 【内】（GitLab 系 diff 结构）。旧实现按【文件级】读
+      old_path/new_path/new_file——恒为 None → 每个文件都被当新文件拼 `--- /dev/null`、
+      删除文件漏 `+++ /dev/null`（unidiff 的 is_removed_file 失真，与 GitHub 路径行为漂移）。
+    - status 词汇：新增='added'、删除='deleted'（GitLab 风格）、修改=【键缺失】。
+    GitHub 的 patch（纯字符串）路径不受影响（p 空时回落文件级字段）。
     已知信息损失（与 GitHub Accept:diff 路径的差异，调用方须知）：
     - 二进制文件 / 纯重命名（无 patch 字段）不入 diff → 不进 changed_files（GitHub 路径
       会以 "Binary files differ" / rename 头出现，但同样无 hunks 可扫）。
     - 必须配合分页取全量（见 get_pr_diff），否则确定性核对漏文件。"""
     parts = []
     for f in files or []:
-        new_fn = f.get("new_path") or f.get("filename") or f.get("old_path")
-        old_fn = f.get("old_path") or new_fn
         patch = f.get("patch")
+        p = patch if isinstance(patch, dict) else {}
+        new_fn = (p.get("new_path") or f.get("new_path") or f.get("filename")
+                  or p.get("old_path") or f.get("old_path"))
+        old_fn = p.get("old_path") or f.get("old_path") or new_fn
         hunks = patch.get("diff") if isinstance(patch, dict) else patch
+        # 新/删判定：patch 内布尔优先；a_mode/b_mode=="0" 是同信息的模式位（实测：
+        # 新文件 a_mode="0"、删文件 b_mode="0"），布尔缺失时兜底；文件级字段留作兼容。
+        new_file = bool(p.get("new_file") or f.get("new_file")
+                        or str(p.get("a_mode", "")) == "0")
+        deleted_file = bool(p.get("deleted_file") or f.get("deleted_file")
+                            or str(p.get("b_mode", "")) == "0")
         if not new_fn or not hunks:
             if new_fn and old_fn and old_fn != new_fn:
                 parts.append(f"diff --git a/{old_fn} b/{new_fn}")
@@ -104,11 +118,19 @@ def _gitcode_files_to_diff(files):
                 print(f"[warn] GitCode files: 跳过无 patch 的文件 {new_fn or '?'}（二进制/重命名/无 hunks）", file=sys.stderr)
             continue
         parts.append(f"diff --git a/{old_fn} b/{new_fn}")
-        if f.get("new_file") or not f.get("old_path"):
+        if new_file:
+            # 对齐真实 git diff 形态（unidiff 解析 /dev/null 目标侧时要求模式行在场，
+            # 否则 UnidiffParseError "Target without source"→parse_diff 整体失败=确定性核对全失效）
+            _b_mode = p.get("b_mode") if str(p.get("b_mode", "")) != "0" else None
+            parts.append(f"new file mode {_b_mode or '100644'}")
+        elif deleted_file:
+            _a_mode = p.get("a_mode") if str(p.get("a_mode", "")) != "0" else None
+            parts.append(f"deleted file mode {_a_mode or '100644'}")
+        if new_file:
             parts.append("--- /dev/null")
         else:
             parts.append(f"--- a/{old_fn}")
-        if f.get("deleted_file") or not new_fn:
+        if deleted_file or not new_fn:
             parts.append("+++ /dev/null")
         else:
             parts.append(f"+++ b/{new_fn}")
@@ -155,6 +177,12 @@ def sync_touchstone_config(owner, repo, number, token, repo_dir="."):
     repo's base branch. This fetches missing yaml files from the base branch
     via the API, ensuring repo-level rules (seeds.yaml, pr.yaml, etc.) always
     apply. Never overwrites files the PR author included.
+
+    2026-09-24 探针实测（GitCode westmoreland/touchstone）：GET /pulls/{n} 的
+    base.sha 存在；contents 目录列表返回 [{type:"file", name}]、单文件
+    {type:"file", encoding:"base64", content}——GitHub/GitCode 两形态一致，本函数
+    对两平台通用。PR 侧删光 .touchstone/ 时会从 base 拉回（门禁规则不可被 PR 内
+    删除绕过，见 docstring 上面的场景说明）。
     """
     import base64 as _b64
     ts_dir = os.path.join(repo_dir, ".touchstone")
@@ -183,6 +211,8 @@ def sync_touchstone_config(owner, repo, number, token, repo_dir="."):
             fname = item.get("name", "")
             if not fname.endswith((".yaml", ".yml")):
                 continue
+            if "/" in fname or "\\" in fname or ".." in fname:
+                continue          # contents 列表正常只有裸文件名；带路径段=逃逸企图，跳过
             local_path = os.path.join(ts_dir, fname)
             if os.path.exists(local_path):
                 continue
@@ -541,8 +571,11 @@ def _stale_review_comments(comments, bot_login):
 def _collapse_stale_reviews(owner, repo, token, stale):
     """就地编辑（PATCH）历史评论为折叠体。逐条隔离：单条失败只告警，不阻塞评审主链。
 
-    GitCode 适配：评论编辑走 PATCH /pulls/comments/{id}（form data）。
-    GitHub 走 PATCH /issues/comments/{id}（JSON）。折叠是纯视觉功能：失败只告警。"""
+    GitCode 适配：评论编辑走 PATCH /pulls/comments/{id}（与取评论的 /pulls/{n}/comments
+    同一 id 命名空间，实测可改）。GitHub 走 PATCH /issues/comments/{id}（JSON）。
+    请求体 JSON（官方文档声明 application/json；2026-09-24 探针实测 form 与 JSON 均
+    200 且真正落库，取 JSON 与仓内其余 POST/PATCH 统一）。
+    折叠是纯视觉功能：失败只告警。"""
     for c in stale:
         folded = _collapse_review_body(c.get("body", "") or "")
         if folded is None:
@@ -551,16 +584,60 @@ def _collapse_stale_reviews(owner, repo, token, stale):
             continue
         try:
             if _is_gitcode():
+                # 不走 gh()：其 base 只认 GITHUB_API_URL，GitCode 部署可能只设
+                # TOUCHSTONE_GITHUB_BASE_URL（与 get_pr_diff/label 同一约定，_api_base()）。
                 _edit_url = _api_base() + f"/repos/{owner}/{repo}/pulls/comments/{c['id']}"
                 _resp = requests.patch(_edit_url, headers={"Authorization": "Bearer " + token,
-                                       "Accept": "application/json"},
-                                       data={"body": folded}, timeout=30)
+                                       "Accept": "application/json",
+                                       "Content-Type": "application/json"},
+                                       json={"body": folded}, timeout=30)
                 _resp.raise_for_status()
             else:
                 gh("PATCH", f"/repos/{owner}/{repo}/issues/comments/{c['id']}", token,
                    {"body": folded})
         except requests.exceptions.RequestException as e:
             print(f"[warn] 历史评论折叠失败(id={c.get('id')})，保持原样: {e}", file=sys.stderr)
+
+
+def _label_names(labels_json):
+    """PR JSON 的 labels 字段 → 标签名列表。GitCode 实测（2026-09-24 探针）返回
+    dict(name=...) 列表；历史版本出现过纯字符串列表（gitcode-adaptation round-8），
+    两种都收——丢掉任何一种形态都会让"标签是否已打上"的核验误报缺失。"""
+    out = []
+    for l in labels_json or []:
+        if isinstance(l, dict):
+            n = l.get("name")
+            if n:
+                out.append(str(n))
+        elif isinstance(l, str) and l:
+            out.append(l)
+    return out
+
+
+def _post_escalate_label(owner, repo, number, token):
+    """打 touchstone:needs-human 标签（GitHub / GitCode 端点与请求体各异）。
+
+    GitCode 适配（2026-09-24 探针实测，westmoreland/touchstone，勿凭"400 但已生效"
+    的旧结论回退——那不成立）：
+    - 正确调用：POST /pulls/{n}/labels + 【纯 JSON 数组】体 ["label"] → 201，追加语义，
+      不覆盖既有标签（escalate 正需要追加，勿用 PUT /pulls/{n}/labels 的替换语义）。
+    - POST /issues/{n}/labels 对 PR 不存在：数组体 404 "Issue Not Found"；
+      {"labels": [...]} 对象体在两个端点都 400 body parsing error 且标签【并未】加上。
+    gh() 对 data 走 json= 序列化，传 list 即发纯数组体，正合 GitCode 要求。"""
+    _label = "touchstone:needs-human"
+    if _is_gitcode():
+        gh("POST", f"/repos/{owner}/{repo}/pulls/{number}/labels", token, [_label])
+        # gh() 已 raise_for_status；追加语义再 GET 核验一次，防端点行为漂移把
+        # "升级信号已传达"变成静默假阳性（标签形态 str/dict 两种都认，见 _label_names）。
+        _pr_chk = gh("GET", f"/repos/{owner}/{repo}/pulls/{number}", token)
+        _names = set(_label_names(_pr_chk.get("labels") if isinstance(_pr_chk, dict) else None))
+        if _label not in _names:
+            raise requests.exceptions.RequestException(
+                "POST /pulls/{n}/labels 返回 2xx 但 GET 未见 needs-human 标签"
+                "（GitCode 端点行为漂移？）")
+        return
+    gh("POST", f"/repos/{owner}/{repo}/issues/{number}/labels", token,
+       {"labels": [_label]})
 
 
 def post_results(owner, repo, number, head_sha, token, risk, findings, loop_info=None,
@@ -1184,27 +1261,7 @@ def main():
     # 升级到人：打标签（best-effort）
     if decision == "escalate":
         try:
-            if _is_gitcode():
-                # GitCode: POST /issues/{n}/labels returns 400 but actually adds
-                # the label (API quirk). PATCH /pulls/{n} with labels overwrites
-                # all existing labels (data format issue) — avoid it.
-                _label_url = _api_base() + f"/repos/{owner}/{repo}/issues/{number}/labels"
-                _resp = requests.post(_label_url, headers={"Authorization": "Bearer " + token,
-                                      "Accept": "application/json", "Content-Type": "application/json"},
-                                      json={"labels": ["touchstone:needs-human"]}, timeout=30)
-                if not _resp.ok:
-                    # 400 is expected but label may still be added; verify
-                    _pr_chk = gh("GET", f"/repos/{owner}/{repo}/pulls/{number}", token)
-                    _names = [l.get("name") for l in (_pr_chk.get("labels") or [])
-                              if isinstance(l, dict)]
-                    if "touchstone:needs-human" not in _names:
-                        raise requests.exceptions.RequestException(
-                            f"label add failed (HTTP {_resp.status_code}) and label not present")
-                    print("[info] GitCode label API returned 400 but label was added",
-                          file=sys.stderr)
-            else:
-                gh("POST", f"/repos/{owner}/{repo}/issues/{number}/labels", token,
-                   {"labels": ["touchstone:needs-human"]})
+            _post_escalate_label(owner, repo, number, token)
         except requests.exceptions.RequestException as e:
             # needs-human 标签打不上 = 人工升级信号丢失——escalate 本身已定，标签只是
             # 传达渠道，失败必须可见（否则升级悄悄变没人接）。
